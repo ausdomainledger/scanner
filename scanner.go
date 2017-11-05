@@ -191,6 +191,7 @@ func ensureSchema() error {
 		`CREATE INDEX IF NOT EXISTS domain_ngram_idx ON domains USING gist (domain gist_trgm_ops);`,
 		`CREATE INDEX IF NOT EXISTS domain_id_idx ON domains (id)`,
 		`CREATE TABLE IF NOT EXISTS logs (url text PRIMARY KEY, active bool, scanned_until bigint);`,
+		`CREATE INDEX IF NOT EXISTS domain_last_seen_idx ON domains(last_seen);`,
 	}
 
 	tx := db.MustBegin()
