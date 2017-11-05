@@ -188,10 +188,9 @@ func submitNames(names map[string]struct{}, ts int64) {
 func ensureSchema() error {
 	schema := []string{
 		`CREATE TABLE IF NOT EXISTS domains (domain varchar(255) UNIQUE NOT NULL, first_seen bigint, last_seen bigint, etld varchar(255), id serial);`,
-		`CREATE INDEX IF NOT EXISTS domain_ngram_idx ON domains USING gist (domain gist_trgm_ops);`,
-		`CREATE INDEX IF NOT EXISTS domain_id_idx ON domains (id)`,
+		`CREATE INDEX IF NOT EXISTS domain_ngram_idx ON domains USING gin (domain gin_trgm_ops);`,
 		`CREATE TABLE IF NOT EXISTS logs (url text PRIMARY KEY, active bool, scanned_until bigint);`,
-		`CREATE INDEX IF NOT EXISTS domain_last_seen_idx ON domains(last_seen);`,
+		`CREATE INDEX IF NOT EXISTS domain_last_seen_and_id_idx ON domains(last_seen, id);`,
 	}
 
 	tx := db.MustBegin()
