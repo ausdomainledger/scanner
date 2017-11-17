@@ -190,7 +190,8 @@ func ensureSchema() error {
 		`CREATE TABLE IF NOT EXISTS domains (domain varchar(255) UNIQUE NOT NULL, first_seen bigint, last_seen bigint, etld varchar(255), id serial);`,
 		`CREATE INDEX IF NOT EXISTS domain_ngram_idx ON domains USING gin (domain gin_trgm_ops);`,
 		`CREATE TABLE IF NOT EXISTS logs (url text PRIMARY KEY, active bool, scanned_until bigint);`,
-		`CREATE INDEX IF NOT EXISTS domain_last_seen_and_id_idx ON domains(last_seen, id);`,
+		`CREATE INDEX IF NOT EXISTS domain_first_seen_and_last_seen_and_id_idx ON domains(first_seen, last_seen, id);`,
+		`CREATE INDEX IF NOT EXISTS etld_idx ON domains (etld);`,
 	}
 
 	tx := db.MustBegin()
