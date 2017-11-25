@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -31,6 +32,7 @@ import (
 	"github.com/google/certificate-transparency-go/scanner"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
+	"github.com/paulbellamy/ratecounter"
 	"golang.org/x/net/publicsuffix"
 )
 
@@ -43,10 +45,13 @@ var (
 	activeLogs []string
 	cl         *http.Client
 	subjRegex  *regexp.Regexp
+	rate       *ratecounter.RateCounter
 )
 
 func main() {
 	subjRegex = regexp.MustCompile(`\.au$`)
+
+	rate = ratecounter.NewRateCounter(time.Second)
 
 	var err error
 	db, err = sqlx.Open("postgres", os.Getenv("SCANNER_DSN"))
@@ -73,6 +78,9 @@ func main() {
 			MaxIdleConns:          100,
 			IdleConnTimeout:       90 * time.Second,
 			ExpectContinueTimeout: time.Second,
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+			},
 		},
 	}
 
@@ -84,7 +92,12 @@ func main() {
 
 	log.Println("Launched all workers.")
 
-	select {}
+	for {
+		if d := rate.Rate(); d > 0 {
+			log.Printf("Current add rate: %d / sec", rate.Rate())
+		}
+		time.Sleep(10 * time.Second)
+	}
 }
 
 func worker(url string) {
@@ -126,10 +139,10 @@ func scan(url string, startIndex int64) error {
 			PrecertificateSubjectRegex: subjRegex,
 		},
 		BatchSize:     1000,
-		NumWorkers:    1,
-		ParallelFetch: 1,
+		NumWorkers:    2,
+		ParallelFetch: 5,
 		StartIndex:    startIndex,
-		Quiet:         false,
+		Quiet:         true,
 	}
 
 	var lastSeen int64
@@ -159,11 +172,16 @@ func scan(url string, startIndex int64) error {
 				m[v] = struct{}{}
 			}
 		}
+
+		log.Printf("%s: +%d", url, len(m))
+
 		submitNames(m, ts)
 	}
 
 	scanner := scanner.NewScanner(logClient, opts)
 	scanner.Scan(context.Background(), handler, handler)
+
+	log.Printf("Scanner %s finished at index %d", url, lastSeen)
 
 	if _, err := db.Exec(`UPDATE logs SET scanned_until = $1 WHERE url = $2;`, lastSeen, url); err != nil {
 		log.Printf("Failed to update latest index for %s: %v", url, err)
@@ -173,7 +191,7 @@ func scan(url string, startIndex int64) error {
 }
 
 func submitNames(names map[string]struct{}, ts int64) {
-	for name, _ := range names {
+	for name := range names {
 		etld, err := publicsuffix.EffectiveTLDPlusOne(name)
 		if err != nil {
 			log.Printf("Couldn't determine etld for %s: %v", name, err)
@@ -182,7 +200,9 @@ func submitNames(names map[string]struct{}, ts int64) {
 		if _, err := db.Exec(`INSERT INTO domains (domain, first_seen, last_seen, etld) VALUES ($1, $2, $2, $3) ON CONFLICT (domain) DO UPDATE SET last_seen = GREATEST($2,domains.last_seen), first_seen = LEAST(domains.first_seen, $2);`, name, ts, etld); err != nil {
 			log.Printf("Failed to insert/update %s: %v", name, err)
 		}
+
 	}
+	rate.Incr(int64(len(names)))
 }
 
 func ensureSchema() error {
