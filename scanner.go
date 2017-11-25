@@ -22,8 +22,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	ct "github.com/google/certificate-transparency-go"
@@ -32,7 +34,6 @@ import (
 	"github.com/google/certificate-transparency-go/scanner"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
-	"github.com/paulbellamy/ratecounter"
 	"golang.org/x/net/publicsuffix"
 )
 
@@ -45,13 +46,10 @@ var (
 	activeLogs []string
 	cl         *http.Client
 	subjRegex  *regexp.Regexp
-	rate       *ratecounter.RateCounter
 )
 
 func main() {
 	subjRegex = regexp.MustCompile(`\.au$`)
-
-	rate = ratecounter.NewRateCounter(time.Second)
 
 	var err error
 	db, err = sqlx.Open("postgres", os.Getenv("SCANNER_DSN"))
@@ -92,12 +90,7 @@ func main() {
 
 	log.Println("Launched all workers.")
 
-	for {
-		if d := rate.Rate(); d > 0 {
-			log.Printf("Current add rate: %d / sec", rate.Rate())
-		}
-		time.Sleep(10 * time.Second)
-	}
+	select {}
 }
 
 func worker(url string) {
@@ -128,7 +121,16 @@ func worker(url string) {
 func scan(url string, startIndex int64) error {
 	log.Printf("Starting %s at index %d", url, startIndex)
 
-	logClient, err := client.New("http://"+url, cl, jsonclient.Options{})
+	// We have to determine what protocol works because it's a total
+	// shitshow between the different CT logs
+	proto := "http://"
+	_, err := cl.Head("http://" + path.Join(url, "/ct/v1/get-roots"))
+	if err != nil {
+		log.Printf("%s not working over HTTP, will use HTTPS: %v", url, err)
+		proto = "https://"
+	}
+
+	logClient, err := client.New(proto+url, cl, jsonclient.Options{})
 	if err != nil {
 		return err
 	}
@@ -140,12 +142,14 @@ func scan(url string, startIndex int64) error {
 		},
 		BatchSize:     1000,
 		NumWorkers:    2,
-		ParallelFetch: 5,
+		ParallelFetch: 1,
 		StartIndex:    startIndex,
 		Quiet:         true,
 	}
 
 	var lastSeen int64
+	lastCheckpoint := time.Now()
+	var checkpointMu sync.Mutex
 
 	handler := func(e *ct.LogEntry) {
 		lastSeen = e.Index
@@ -161,6 +165,14 @@ func scan(url string, startIndex int64) error {
 			names = append(names, e.Precert.TBSCertificate.DNSNames...)
 			ts = e.Precert.TBSCertificate.NotBefore.Unix()
 		}
+
+		checkpointMu.Lock()
+		if time.Since(lastCheckpoint) > time.Minute {
+			checkpointLog(url, lastSeen)
+			lastCheckpoint = time.Now()
+		}
+		checkpointMu.Unlock()
+
 		if names == nil || len(names) == 0 {
 			return
 		}
@@ -173,21 +185,25 @@ func scan(url string, startIndex int64) error {
 			}
 		}
 
-		log.Printf("%s: +%d", url, len(m))
-
 		submitNames(m, ts)
 	}
 
 	scanner := scanner.NewScanner(logClient, opts)
-	scanner.Scan(context.Background(), handler, handler)
+	if err := scanner.Scan(context.Background(), handler, handler); err != nil {
+		log.Printf("Scanner %s failed: %v", url, err)
+	}
 
 	log.Printf("Scanner %s finished at index %d", url, lastSeen)
 
+	checkpointLog(url, lastSeen)
+
+	return nil
+}
+
+func checkpointLog(url string, lastSeen int64) {
 	if _, err := db.Exec(`UPDATE logs SET scanned_until = $1 WHERE url = $2;`, lastSeen, url); err != nil {
 		log.Printf("Failed to update latest index for %s: %v", url, err)
 	}
-
-	return nil
 }
 
 func submitNames(names map[string]struct{}, ts int64) {
@@ -202,7 +218,6 @@ func submitNames(names map[string]struct{}, ts int64) {
 		}
 
 	}
-	rate.Incr(int64(len(names)))
 }
 
 func ensureSchema() error {
