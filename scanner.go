@@ -67,7 +67,7 @@ func main() {
 		log.Fatalf("Failed to update log servers: %v", err)
 	}
 	cl = &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: 360 * time.Second,
 		Transport: &http.Transport{
 			TLSHandshakeTimeout:   30 * time.Second,
 			ResponseHeaderTimeout: 30 * time.Second,
